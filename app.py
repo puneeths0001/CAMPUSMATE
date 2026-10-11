@@ -2,6 +2,7 @@
 Campus Mate - your study, money and safety companion.
 Run with:  streamlit run app.py
 """
+import html as _html
 import os
 import re
 import urllib.parse
@@ -115,6 +116,22 @@ div[data-baseweb="tab-border"] { background: rgba(255,255,255,.08) !important; }
 ::-webkit-scrollbar { width:8px; height:8px; }
 ::-webkit-scrollbar-track { background:#06070a; }
 ::-webkit-scrollbar-thumb { background:#1f2937; border-radius:4px; }
+/* Scam result panel */
+.sc-panel { background:#170533; border:1px solid rgba(255,255,255,.08); border-radius:28px; padding:24px 22px; margin:10px 0; }
+.sc-badge { display:inline-block; background:var(--c, #EF4444); color:#fff; font-weight:800; font-size:.72rem;
+  letter-spacing:.08em; padding:5px 12px; border-radius:999px; margin-bottom:14px; }
+.sc-panel svg { display:block; }
+.sc-head { font-size:2rem; font-weight:800; line-height:1.15; color:#fff; margin:14px 0 16px; }
+.sc-box { border-radius:10px; padding:14px 16px; color:#1f2937; font-size:.88rem; line-height:1.5; margin-bottom:20px; }
+.sc-sub { color:#d8c9f5; font-size:1.05rem; font-weight:500; margin-bottom:14px; }
+.sc-reason { display:flex; gap:14px; margin:0 0 18px; }
+.sc-flag { flex:none; padding-top:2px; }
+.sc-rt { color:#fff; font-size:1.05rem; font-weight:600; }
+.sc-rd { color:#b9a8d6; font-size:.9rem; line-height:1.5; margin-top:2px; }
+.sc-steps { background: rgba(18,20,29,.55); border:1px solid rgba(255,255,255,.08); border-radius:16px;
+  padding:16px 20px; margin:10px 0; backdrop-filter: blur(16px); }
+.sc-st { font-weight:700; font-size:1.05rem; margin-bottom:6px; color:#fff; }
+.sc-steps ol { margin:0; padding-left:20px; color:#d1d5db; line-height:1.7; font-size:.92rem; }
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -173,51 +190,146 @@ def reminders_tab():
 # ----------------------------------------------------------------------------
 # 2. Expenses
 # ----------------------------------------------------------------------------
+CATS = ["Food", "Travel", "Stationery", "Fees", "Entertainment", "Shopping", "Other"]
+MODES = ["UPI", "Cash"]
+
+
+def expense_form(prefix, amount=0.0, mode="UPI", category="Food", day=None, note=""):
+    """The boxes used both for adding and for editing an expense."""
+    c1, c2 = st.columns(2)
+    amount = c1.number_input("Amount (₹)", min_value=0.0, step=10.0, value=float(amount), key=f"{prefix}_amt")
+    mode = c2.selectbox("Paid by", MODES, index=MODES.index(mode) if mode in MODES else 0, key=f"{prefix}_mode")
+    c3, c4 = st.columns(2)
+    category = c3.selectbox("Category", CATS, index=CATS.index(category) if category in CATS else len(CATS) - 1,
+                            key=f"{prefix}_cat")
+    day = c4.date_input("Date", value=day or date.today(), key=f"{prefix}_day")
+    note = st.text_input("Note (optional)", value=note or "", key=f"{prefix}_note")
+    return amount, mode, category, day, note
+
+
 def expenses_tab():
     st.subheader("💸 Expense Tracker")
     budget = float(get_setting("budget", "3000") or 3000)
     new_budget = st.number_input("Monthly budget (₹)", min_value=0.0, value=budget, step=100.0)
     if new_budget != budget:
         set_setting("budget", new_budget)
+    budget = new_budget
 
+    # --- add an expense ---
+    if st.session_state.pop("reset_add", False):  # clear the boxes after saving
+        for k in ("add_amt", "add_note"):
+            st.session_state.pop(k, None)
     with st.expander("➕ Add an expense", expanded=True):
-        c1, c2 = st.columns(2)
-        amount = c1.number_input("Amount (₹)", min_value=0.0, step=10.0)
-        mode = c2.selectbox("Paid by", ["UPI", "Cash"])
-        c3, c4 = st.columns(2)
-        category = c3.selectbox("Category", ["Food", "Travel", "Stationery", "Fees", "Entertainment", "Shopping", "Other"])
-        day = c4.date_input("Date", value=date.today())
-        note = st.text_input("Note (optional)")
+        amount, mode, category, day, note = expense_form("add")
         if st.button("Save expense", type="primary") and amount > 0:
             run("INSERT INTO expenses(day,amount,mode,category,note) VALUES(?,?,?,?,?)",
                 (day.isoformat(), amount, mode, category, note))
-            st.success("Saved!")
+            st.session_state["reset_add"] = True
+            st.toast("Expense saved ✅")
             st.rerun()
 
     df = table("SELECT * FROM expenses ORDER BY day DESC, id DESC")
     if df.empty:
-        st.info("No expenses yet.")
+        st.info("No expenses yet. Add your first one above.")
         return
-    this = df[df["day"].str.startswith(date.today().strftime("%Y-%m"))]
-    spent = this["amount"].sum()
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Spent this month", f"₹{spent:,.0f}")
-    m2.metric("Budget left", f"₹{new_budget - spent:,.0f}")
-    upi, cash = this[this["mode"] == "UPI"]["amount"].sum(), this[this["mode"] == "Cash"]["amount"].sum()
-    m3.metric("UPI / Cash", f"₹{upi:,.0f} / ₹{cash:,.0f}")
-    if new_budget > 0:
-        st.progress(min(spent / new_budget, 1.0))
-        if spent >= new_budget:
-            st.error("🚨 You've crossed your monthly budget!")
-        elif spent >= 0.8 * new_budget:
-            st.warning("⚠️ You've used over 80% of your budget.")
-    if not this.empty:
-        by_cat = this.groupby("category")["amount"].sum()
-        st.markdown("**Spending by category**")
-        st.bar_chart(by_cat)
-        st.info(f"💡 Your biggest spending area this month is **{by_cat.idxmax()}**.")
-    st.markdown("**Recent transactions**")
-    st.dataframe(df[["day", "amount", "mode", "category", "note"]].head(15), hide_index=True)
+
+    # --- this month's summary ---
+    month = date.today().strftime("%Y-%m")
+    this = df[df["day"].str.startswith(month)]
+    spent = float(this["amount"].sum())
+    left = budget - spent
+    m1, m2 = st.columns(2)
+    m1.metric("Total spent this month", f"₹{spent:,.0f}")
+    m2.metric("Remaining budget", f"₹{left:,.0f}",
+              delta=(f"₹{-left:,.0f} over budget" if left < 0 else f"of ₹{budget:,.0f}"),
+              delta_color=("inverse" if left < 0 else "off"))
+    if budget > 0:
+        st.progress(min(spent / budget, 1.0), text=f"{spent / budget * 100:.0f}% of your budget used")
+        if left < 0:
+            st.error(f"⚠️ You're over budget by ₹{-left:,.0f} this month!")
+        elif spent >= 0.8 * budget:
+            st.warning(f"⚠️ Careful! Only ₹{left:,.0f} left, over 80% of your budget is gone.")
+    upi = float(this[this["mode"] == "UPI"]["amount"].sum())
+    st.caption(f"📱 UPI: ₹{upi:,.0f}  ·  💵 Cash: ₹{spent - upi:,.0f}")
+
+    # --- charts ---
+    if this.empty:
+        st.info("No spending recorded this month yet.")
+    else:
+        by_cat = this.groupby("category")["amount"].sum().sort_values(ascending=False)
+        t1, t2, t3 = st.tabs(["📊 By category", "🍩 Share", "📅 Daily"])
+        with t1:
+            st.bar_chart(by_cat)
+        with t2:
+            try:
+                import altair as alt
+                d = by_cat.reset_index()
+                d.columns = ["category", "amount"]
+                st.altair_chart(
+                    alt.Chart(d).mark_arc(innerRadius=55).encode(
+                        theta="amount:Q", color=alt.Color("category:N"), tooltip=["category", "amount"]),
+                    use_container_width=True)
+            except Exception:
+                st.bar_chart(by_cat)
+            for cat, amt in by_cat.items():
+                st.write(f"**{cat}**: ₹{amt:,.0f} ({amt / spent * 100:.0f}%)")
+        with t3:
+            st.bar_chart(this.groupby("day")["amount"].sum())
+        st.info(f"💡 Your biggest spending area this month is **{by_cat.index[0]}** (₹{by_cat.iloc[0]:,.0f}).")
+
+    # --- history with edit and delete ---
+    st.markdown("### 🧾 Expense history")
+    months = ["All time"] + sorted({d[:7] for d in df["day"]}, reverse=True)
+    pick = st.selectbox("Show", months, index=months.index(month) if month in months else 0)
+    view = df if pick == "All time" else df[df["day"].str.startswith(pick)]
+    st.caption(f"{len(view)} expense(s) · total ₹{view['amount'].sum():,.0f}")
+
+    eid = st.session_state.get("edit_id")
+    if eid is not None:
+        row = df[df["id"] == eid]
+        if row.empty:
+            st.session_state.pop("edit_id", None)
+        else:
+            r = row.iloc[0]
+            with st.container(border=True):
+                st.markdown("**✏️ Edit expense**")
+                a, m, c, d, n = expense_form(f"ef{eid}", r["amount"], r["mode"], r["category"],
+                                             date.fromisoformat(r["day"]), r["note"])
+                s1, s2 = st.columns(2)
+                if s1.button("💾 Save changes", type="primary", key="save_edit"):
+                    run("UPDATE expenses SET day=?, amount=?, mode=?, category=?, note=? WHERE id=?",
+                        (d.isoformat(), a, m, c, n, int(eid)))
+                    st.session_state.pop("edit_id", None)
+                    st.toast("Expense updated ✅")
+                    st.rerun()
+                if s2.button("Cancel", key="cancel_edit"):
+                    st.session_state.pop("edit_id", None)
+                    st.rerun()
+
+    for _, r in view.head(50).iterrows():
+        rid = int(r["id"])
+        c1, c2, c3 = st.columns([6, 1, 1])
+        note_txt = f" · {r['note']}" if r["note"] else ""
+        c1.markdown(f"**₹{r['amount']:,.0f}** · {r['category']} · {r['mode']}  \n{r['day']}{note_txt}")
+        if c2.button("✏️", key=f"edit_{rid}"):
+            st.session_state["edit_id"] = rid
+            st.session_state.pop("del_id", None)
+            st.rerun()
+        if c3.button("🗑️", key=f"del_{rid}"):
+            st.session_state["del_id"] = rid
+            st.session_state.pop("edit_id", None)
+            st.rerun()
+        if st.session_state.get("del_id") == rid:
+            st.warning(f"Delete this ₹{r['amount']:,.0f} {r['category']} expense? This can't be undone.")
+            y, n = st.columns(2)
+            if y.button("Yes, delete", key=f"yes_{rid}", type="primary"):
+                run("DELETE FROM expenses WHERE id=?", (rid,))
+                st.session_state.pop("del_id", None)
+                st.toast("Expense deleted 🗑️")
+                st.rerun()
+            if n.button("Cancel", key=f"no_{rid}"):
+                st.session_state.pop("del_id", None)
+                st.rerun()
 
 
 # ----------------------------------------------------------------------------
@@ -290,20 +402,29 @@ def sos_tab():
 # ----------------------------------------------------------------------------
 # 4. Scam shield
 # ----------------------------------------------------------------------------
+esc = _html.escape
+
 TEXT_RULES = [
     (r"(registration|processing|application|security|refundable|joining)\s+(fee|fees|deposit|charges?)", 3,
-     "Asks you to pay a fee. Real scholarships and genuine jobs don't charge you."),
-    (r"\b(otp|cvv|pin|password|aadhaar|aadhar)\b", 3, "Asks for sensitive details (OTP/PIN/password/Aadhaar)."),
+     "Request for payment", "You're asked to pay a fee. Real scholarships, jobs and hackathons don't charge you to be selected."),
+    (r"\b(otp|cvv|pin|password|aadhaar|aadhar)\b", 3,
+     "Request for personal information", "This message asks for an OTP, PIN, password or Aadhaar. Legitimate sources never ask for these."),
     (r"(urgent|last chance|hurry|act now|expires (today|soon)|limited seats|within \d+ (hours|minutes))", 1,
-     "Creates fake urgency to make you rush."),
-    (r"(guaranteed|100% ?(selection|placement|job|success))", 2, "Promises guaranteed results, a classic scam sign."),
-    (r"earn\s*(rs\.?|₹|inr)?\s*\d", 2, "Promises easy earnings."),
-    (r"(bank|upi|account)\s*(details|number|id)", 2, "Asks for your bank or UPI details."),
+     "Urgency", "The message creates pressure to act fast, so you don't have time to think or check."),
+    (r"(guaranteed|100% ?(selection|placement|job|success))", 2,
+     "Unrealistic promises", "Guaranteed selection or results is a classic scam sign. Nobody can promise that."),
+    (r"earn\s*(rs\.?|₹|inr)?\s*\d", 2,
+     "Too-good-to-be-true earnings", "It promises easy money. Real work doesn't pay big for little effort."),
+    (r"(bank|upi|account)\s*(details|number|id)", 2,
+     "Request for bank details", "It asks for your bank or UPI details, which scammers use to take your money."),
     (r"(congratulations|you (have been|are|were) (selected|shortlisted|chosen)|you (won|have won))", 2,
-     "Says you're selected or won something you never applied for."),
-    (r"(gift card|lottery|prize|lucky draw)", 2, "Mentions prizes, gift cards or lotteries."),
-    (r"(whatsapp|telegram)\s*(group|us|number|me)", 1, "Pushes you to move the chat to WhatsApp/Telegram."),
-    (r"(work from home|part[- ]time).{0,40}(earn|income|salary)", 2, "Too-good-to-be-true work-from-home offer."),
+     "Surprise selection", "It says you're selected or won something you never applied for."),
+    (r"(gift card|lottery|prize|lucky draw)", 2,
+     "Prizes and gifts", "Prizes, gift cards and lotteries are common bait in scam messages."),
+    (r"(whatsapp|telegram)\s*(group|us|number|me)", 1,
+     "Moving the chat elsewhere", "It pushes you to continue on WhatsApp or Telegram, away from official channels."),
+    (r"(work from home|part[- ]time).{0,40}(earn|income|salary)", 2,
+     "Easy work-from-home offer", "Easy work-from-home income offers are a very common scam."),
 ]
 SHORTENERS = {"bit.ly", "tinyurl.com", "goo.gl", "t.co", "cutt.ly", "rb.gy", "is.gd", "shorturl.at", "ow.ly", "tiny.cc"}
 RISKY_TLDS = (".xyz", ".top", ".club", ".online", ".site", ".click", ".buzz", ".work", ".info", ".link", ".live", ".shop")
@@ -316,65 +437,145 @@ URL_RE = re.compile(
 
 
 def analyze(text):
-    score, reasons, urls = 0, [], URL_RE.findall(text)
+    """Returns (score, reasons, good_signs, urls). Each reason has a title, description and points."""
+    found, good, score = {}, [], 0
+    urls = URL_RE.findall(text)
     low = text.lower()
-    for pattern, pts, why in TEXT_RULES:
+
+    def add(title, pts, desc):
+        nonlocal score
+        score += pts
+        if title in found:
+            found[title]["desc"] += " " + desc
+            found[title]["pts"] += pts
+        else:
+            found[title] = {"title": title, "desc": desc, "pts": pts}
+
+    for pattern, pts, title, desc in TEXT_RULES:
         if re.search(pattern, low):
-            score += pts
-            reasons.append(why)
+            add(title, pts, desc)
     for u in urls:
         full = u if u.startswith("http") else "http://" + u
         host = (urllib.parse.urlparse(full).hostname or "").lower()
         if host.endswith(OFFICIAL_ENDINGS):
             score -= 2
-            reasons.append(f"✅ `{host}` ends with an official government/education domain.")
+            good.append(f"The link '{host}' ends with an official government or education domain.")
             continue
         if host in SHORTENERS:
-            score += 2
-            reasons.append(f"`{host}` is a link shortener that hides the real destination.")
+            add("Hidden link destination", 2, f"'{host}' is a link shortener that hides where you'll really land.")
         if host.endswith(RISKY_TLDS):
-            score += 2
-            reasons.append(f"`{host}` uses an extension often used by scam sites.")
+            add("Suspicious links", 2, f"'{host}' uses an ending often seen on scam websites.")
         if full.startswith("http://"):
-            score += 1
-            reasons.append(f"`{host}` isn't using secure HTTPS.")
+            add("Insecure connection", 1, f"'{host}' doesn't use secure HTTPS.")
         if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", host):
-            score += 3
-            reasons.append("The link is a raw IP address, not a real website name.")
+            add("Suspicious links", 3, "The link is a raw IP address, not a real website name.")
         if host.count("-") >= 2:
-            score += 1
-            reasons.append(f"`{host}` has many hyphens, common in fake lookalike sites.")
+            add("Lookalike website", 1, f"'{host}' has many hyphens, common in fake copies of real sites.")
         if any(w in host for w in BAIT_WORDS):
-            score += 2
-            reasons.append(f"`{host}` is full of bait words (scholarship/job/offer...) but isn't an official domain.")
-    return max(score, 0), reasons, urls
+            add("Suspicious website name", 2,
+                f"'{host}' is stuffed with bait words (scholarship, job, offer...) but isn't an official domain.")
+    reasons = sorted(found.values(), key=lambda r: -r["pts"])
+    return max(score, 0), reasons, good, urls
+
+
+LEVELS = {
+    "high": dict(label="HIGH RISK", headline="This is probably a scam.", color="#EF4444", box="#FECACA",
+                 note="This message shows signs of a scam, but sometimes real messages have similar signs. "
+                      "Still unsure? Check the official website or call 1930."),
+    "medium": dict(label="MEDIUM RISK", headline="This looks suspicious.", color="#F59E0B", box="#FDE68A",
+                   note="This message has some warning signs. Check it carefully before you click or reply. "
+                        "Still unsure? Ask a teacher or call 1930."),
+    "low": dict(label="LOW RISK", headline="No obvious warning signs.", color="#22C55E", box="#BBF7D0",
+                note="We didn't find common scam signs, but no checker is perfect. Stay careful with links and payments."),
+}
+NEXT_STEPS = {
+    "high": ["Don't click any link, reply, or pay anything.",
+             "Never share your OTP, PIN, password or Aadhaar number.",
+             "Check the opportunity yourself on the official website. Type the address, don't use the link.",
+             "Show the message to a parent, teacher or your placement cell.",
+             "Report it at cybercrime.gov.in or call 1930, then block the sender."],
+    "medium": ["Don't click the link or pay anything yet.",
+               "Search for the organisation's official website and compare the details.",
+               "Ask your teacher or placement cell if it's genuine.",
+               "Remember: real opportunities never ask you to pay to be selected.",
+               "If you're still unsure, treat it as a scam."],
+    "low": ["Still check the sender and the link before you apply.",
+            "Never pay a fee or share an OTP/PIN to get an opportunity.",
+            "For scholarships, use official sites like scholarships.gov.in.",
+            "If anything feels off later, come back and check again."],
+}
+FLAG_SVG = ('<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#F472B6" stroke-width="2" '
+            'stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4"/><path d="M5 4h12l-2.5 4 2.5 4H5"/></svg>')
+
+
+def risk_level(score):
+    return "high" if score >= 5 else ("medium" if score >= 2 else "low")
+
+
+def icon_svg(level, color):
+    shape = ('<circle cx="32" cy="32" r="24"/><path d="M21 33 l8 8 14-16"/>' if level == "low"
+             else '<path d="M32 8 L58 54 H6 Z"/><path d="M32 26 V38"/><circle cx="32" cy="46" r="1.5" fill="' + color + '"/>')
+    return ('<svg width="60" height="60" viewBox="0 0 64 64" fill="none" stroke="' + color +
+            '" stroke-width="4" stroke-linejoin="round" stroke-linecap="round">' + shape + '</svg>')
+
+
+def reasons_html(items):
+    return "".join(
+        '<div class="sc-reason"><div class="sc-flag">' + FLAG_SVG + '</div><div><div class="sc-rt">' +
+        esc(r["title"]) + '</div><div class="sc-rd">' + esc(r["desc"]) + '</div></div></div>' for r in items)
+
+
+def panel_html(level, reasons):
+    lv = LEVELS[level]
+    body = ""
+    if reasons:
+        body = '<div class="sc-sub">Here are the key reasons why:</div>' + reasons_html(reasons[:3])
+    else:
+        body = '<div class="sc-sub">We did not spot any common scam signs in this message.</div>'
+    return ('<div class="sc-panel" style="--c:' + lv["color"] + '"><div class="sc-badge">' + lv["label"] + '</div>' +
+            icon_svg(level, lv["color"]) + '<div class="sc-head">' + lv["headline"] + '</div>' +
+            '<div class="sc-box" style="background:' + lv["box"] + '">' + esc(lv["note"]) + '</div>' + body + '</div>')
+
+
+def steps_html(level):
+    items = "".join("<li>" + esc(s) + "</li>" for s in NEXT_STEPS[level])
+    return '<div class="sc-steps"><div class="sc-st">✅ What to do next</div><ol>' + items + '</ol></div>'
+
+
+def render_scam(res):
+    level = risk_level(res["score"])
+    st.markdown(panel_html(level, res["reasons"]), unsafe_allow_html=True)
+    n = len(res["reasons"])
+    if n > 3:
+        with st.expander(f"Show all {n} reasons"):
+            st.markdown('<div class="sc-panel">' + reasons_html(res["reasons"]) + '</div>', unsafe_allow_html=True)
+    for g in res["good"]:
+        st.success("✅ " + g)
+    if res["urls"]:
+        st.caption("Links found: " + ", ".join(res["urls"]))
+    st.markdown(steps_html(level), unsafe_allow_html=True)
+    if res["ai"]:
+        st.info("🤖 AI second opinion: " + res["ai"])
+    elif res["ai_err"]:
+        st.caption(f"(AI second opinion unavailable: {res['ai_err']})")
 
 
 def scam_tab():
     st.subheader("🛡️ Scam Link Shield")
     st.caption("Paste a message or link about scholarships, hackathons, placements or job offers.")
-    text = st.text_area("Paste here", height=130,
+    text = st.text_area("Paste here", height=130, key="scam_text",
                         placeholder="Congratulations! You are selected for a scholarship. Pay ₹499 registration fee at http://nsp-scholar-claim.xyz")
     if st.button("Check it", type="primary") and text.strip():
-        score, reasons, urls = analyze(text)
-        if score >= 5:
-            st.error(f"🔴 HIGH RISK (score {score}). Do NOT click or pay anything.")
-        elif score >= 2:
-            st.warning(f"🟡 SUSPICIOUS (score {score}). Verify on the official website before trusting it.")
-        else:
-            st.success(f"🟢 No obvious red flags (score {score}). Still, never share OTPs or pay to get an opportunity.")
-        if urls:
-            st.write("**Links found:**", ", ".join(f"`{u}`" for u in urls))
-        for r in reasons:
-            st.write("•", r)
+        score, reasons, good, urls = analyze(text)
+        ai, ai_err = None, ""
         if ai_available():
             with st.spinner("AI is taking a second look..."):
                 ai = ask_ai("A student received this message. In 3 short, simple sentences say whether it looks "
                             f"like a scam, why, and what they should do:\n\n{text}")
-            if ai:
-                st.info("🤖 " + ai)
-            else:
-                st.caption(f"(AI explanation unavailable: {AI_STATUS['error']})")
+            ai_err = "" if ai else AI_STATUS["error"]
+        st.session_state["scam"] = dict(score=score, reasons=reasons, good=good, urls=urls, ai=ai, ai_err=ai_err)
+    if st.session_state.get("scam"):
+        render_scam(st.session_state["scam"])
     with st.expander("🔒 Safety rules to remember"):
         st.markdown(
             "- Real scholarships, jobs and hackathons **never** ask for a fee to select you.\n"
