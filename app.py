@@ -7,16 +7,20 @@ import os
 import re
 import urllib.parse
 import urllib.request
-from datetime import date, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 
-import pandas as pd
 import streamlit as st
 
 from common import (
-    AI_STATUS, ai_available, ask_ai, days_label, get_setting, init_db, run,
-    secret, send_digest, set_setting, smart_parse, table, tg_call, tg_find_chats,
-    tg_send, tg_send_location,
+    AI_STATUS, ai_available, ask_ai, due_dt, due_label, fmt_time, get_setting, init_db,
+    run, secret, send_digest, set_setting, smart_parse, table, tg_find_chats, tg_send,
+    tg_send_location,
 )
+
+try:
+    import altair as alt
+except Exception:
+    alt = None
 
 try:  # real phone GPS (optional extra package)
     from streamlit_js_eval import get_geolocation
@@ -33,8 +37,8 @@ except Exception:
     pass
 
 # ----------------------------------------------------------------------------
-# Design  (dark glass look: glowing purple / pink / cyan)
-# To change colours later, edit the hex codes (like #8B5CF6) in the CSS below.
+# Design  (glass look with a Dark / Light mode switch)
+# To change colours later, edit the hex codes (like #8B5CF6) below.
 # ----------------------------------------------------------------------------
 CAP = ('<svg width="26" height="26" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">'
        '<polygon points="32,14 58,28 32,42 6,28" fill="#C084FC"/>'
@@ -42,20 +46,30 @@ CAP = ('<svg width="26" height="26" viewBox="0 0 64 64" xmlns="http://www.w3.org
        '<path d="M58 28 v15" stroke="#22D3EE" stroke-width="3.5" stroke-linecap="round"/>'
        '<circle cx="58" cy="46" r="3.5" fill="#22D3EE"/></svg>')
 
-CSS = """
-<style>
+PALETTE = ["#8B5CF6", "#EC4899", "#06B6D4", "#F59E0B", "#22C55E", "#3B82F6", "#F43F5E"]
+
+DARK_VARS = dict(bg="#06070a", text="#F3F4F6", muted="#9CA3AF", card="rgba(18,20,29,.55)",
+                 border="rgba(255,255,255,.08)", input="rgba(18,20,29,.7)", nav="rgba(6,7,10,.7)",
+                 grid="rgba(255,255,255,.025)", o1=".30", o2=".20", o3=".20", btn="rgba(18,20,29,.6)",
+                 btnborder="rgba(255,255,255,.12)", btntext="#e5e7eb", pill="rgba(18,20,29,.55)",
+                 pilltext="#c4b5fd", thumb="#1f2937")
+LIGHT_VARS = dict(bg="#F6F5FB", text="#111827", muted="#4B5563", card="rgba(255,255,255,.8)",
+                  border="rgba(17,24,39,.10)", input="#FFFFFF", nav="rgba(255,255,255,.85)",
+                  grid="rgba(17,24,39,.035)", o1=".16", o2=".12", o3=".12", btn="rgba(255,255,255,.9)",
+                  btnborder="rgba(17,24,39,.15)", btntext="#111827", pill="rgba(255,255,255,.8)",
+                  pilltext="#6D28D9", thumb="#CBD5E1")
+
+BASE_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 html, body, .stApp, .stMarkdown, button, input, textarea { font-family: 'Inter', sans-serif !important; }
-
-/* Page background: dark with glowing colour orbs and a faint grid */
 .stApp {
-  background-color: #06070a;
+  background-color: var(--bg);
   background-image:
-    radial-gradient(650px circle at 0% 0%, rgba(147,51,234,.30), transparent 60%),
-    radial-gradient(520px circle at 100% 30%, rgba(6,182,212,.20), transparent 60%),
-    radial-gradient(580px circle at 35% 100%, rgba(219,39,119,.20), transparent 60%),
-    linear-gradient(to right, rgba(255,255,255,.025) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(255,255,255,.025) 1px, transparent 1px);
+    radial-gradient(650px circle at 0% 0%, rgba(147,51,234,var(--o1)), transparent 60%),
+    radial-gradient(520px circle at 100% 30%, rgba(6,182,212,var(--o2)), transparent 60%),
+    radial-gradient(580px circle at 35% 100%, rgba(219,39,119,var(--o3)), transparent 60%),
+    linear-gradient(to right, var(--grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
   background-size: auto, auto, auto, 64px 64px, 64px 64px;
   background-attachment: fixed;
 }
@@ -64,59 +78,54 @@ footer { visibility: hidden; }
 .block-container { padding-top: 1.5rem; max-width: 780px; }
 h1, h2, h3 { letter-spacing: -0.02em; font-weight: 800; }
 
-/* Header */
 .cm-nav { display:flex; align-items:center; gap:12px; padding:10px 16px; margin-bottom:18px;
-  background: rgba(6,7,10,.7); border:1px solid rgba(255,255,255,.08); border-radius:18px;
-  backdrop-filter: blur(20px); }
+  background: var(--nav); border:1px solid var(--border); border-radius:18px; backdrop-filter: blur(20px); }
 .cm-logo { width:44px; height:44px; border-radius:14px; padding:1.5px;
   background: linear-gradient(135deg,#8B5CF6,#EC4899,#06B6D4); }
 .cm-logo > div { width:100%; height:100%; background:#0A0B10; border-radius:12.5px;
   display:flex; align-items:center; justify-content:center; }
-.cm-brand { font-weight:800; font-size:1.3rem; letter-spacing:-0.01em; color:#fff; }
+.cm-brand { font-weight:800; font-size:1.3rem; letter-spacing:-0.01em; color:var(--text); }
 .cm-brand span { color:#8B5CF6; }
-.cm-hero { text-align:center; margin:6px 0 22px; }
+.cm-hero { text-align:center; margin:6px 0 14px; }
 .cm-pill { display:inline-flex; align-items:center; gap:8px; padding:6px 14px; border-radius:999px;
-  background: rgba(18,20,29,.55); border:1px solid rgba(139,92,246,.35); color:#c4b5fd;
+  background: var(--pill); border:1px solid rgba(139,92,246,.35); color:var(--pilltext);
   font-size:.75rem; font-weight:600; backdrop-filter: blur(16px); }
 .cm-ping { width:8px; height:8px; border-radius:50%; background:#EC4899; animation: cmPing 1.6s infinite; }
 @keyframes cmPing { 0% { box-shadow:0 0 0 0 rgba(236,72,153,.7); } 100% { box-shadow:0 0 0 10px rgba(236,72,153,0); } }
-.cm-title { font-size:2rem; font-weight:800; line-height:1.15; margin:14px 0 4px; color:#fff; }
+.cm-title { font-size:2rem; font-weight:800; line-height:1.15; margin:14px 0 4px; color:var(--text); }
 .gradient-text { background: linear-gradient(135deg,#A855F7 0%,#EC4899 50%,#3B82F6 100%);
   -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
 
-/* Glass cards */
 div[data-testid="stMetric"], [data-testid="stExpander"] {
-  background: rgba(18,20,29,.55); border:1px solid rgba(255,255,255,.08);
-  border-radius:16px; backdrop-filter: blur(16px); }
+  background: var(--card); border:1px solid var(--border); border-radius:16px; backdrop-filter: blur(16px); }
 div[data-testid="stMetric"] { padding:14px 18px; }
 [data-testid="stExpander"] details { border:none; background:transparent; }
 [data-testid="stAlert"] { border-radius:14px; }
 
-/* Inputs */
 div[data-baseweb="input"], div[data-baseweb="base-input"], div[data-baseweb="textarea"],
-div[data-baseweb="select"] > div { border-radius:12px; background: rgba(18,20,29,.7); }
+div[data-baseweb="select"] > div { border-radius:12px; background: var(--input); }
 
-/* Buttons: gradient for main actions, glass for the rest */
 .stButton > button, .stLinkButton > a { border-radius:14px; font-weight:600;
-  background: rgba(18,20,29,.6); border:1px solid rgba(255,255,255,.12); color:#e5e7eb; transition: all .25s; }
-.stButton > button:hover, .stLinkButton > a:hover { border-color:#8B5CF6; color:#fff; }
+  background: var(--btn); border:1px solid var(--btnborder); color: var(--btntext); transition: all .25s; }
+.stButton > button:hover, .stLinkButton > a:hover { border-color:#8B5CF6; }
 .stButton > button[kind="primary"], button[data-testid="stBaseButton-primary"] {
   background: linear-gradient(90deg,#9333EA,#DB2777,#06B6D4); border:none; color:#fff;
   box-shadow: 0 10px 28px rgba(147,51,234,.35); }
 .stButton > button[kind="primary"]:hover, button[data-testid="stBaseButton-primary"]:hover {
   transform: scale(1.02); box-shadow: 0 12px 34px rgba(147,51,234,.55); color:#fff; }
+.st-key-sos_btn button { width:100%; padding:.9rem 0; font-size:1.1rem; }
 
-/* Tabs */
-button[data-baseweb="tab"] { font-weight:600; color:#9ca3af; }
-button[data-baseweb="tab"][aria-selected="true"] { color:#fff; }
+button[data-baseweb="tab"] { font-weight:600; color: var(--muted); }
+button[data-baseweb="tab"][aria-selected="true"] { color: var(--text); }
 div[data-baseweb="tab-highlight"] { background: linear-gradient(90deg,#A855F7,#EC4899,#06B6D4) !important;
   height:3px; border-radius:3px; }
-div[data-baseweb="tab-border"] { background: rgba(255,255,255,.08) !important; }
+div[data-baseweb="tab-border"] { background: var(--border) !important; }
 
 ::-webkit-scrollbar { width:8px; height:8px; }
-::-webkit-scrollbar-track { background:#06070a; }
-::-webkit-scrollbar-thumb { background:#1f2937; border-radius:4px; }
-/* Scam result panel */
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--thumb); border-radius:4px; }
+
+/* Scam result panel (stays dark in both modes, like a warning screen) */
 .sc-panel { background:#170533; border:1px solid rgba(255,255,255,.08); border-radius:28px; padding:24px 22px; margin:10px 0; }
 .sc-badge { display:inline-block; background:var(--c, #EF4444); color:#fff; font-weight:800; font-size:.72rem;
   letter-spacing:.08em; padding:5px 12px; border-radius:999px; margin-bottom:14px; }
@@ -128,13 +137,63 @@ div[data-baseweb="tab-border"] { background: rgba(255,255,255,.08) !important; }
 .sc-flag { flex:none; padding-top:2px; }
 .sc-rt { color:#fff; font-size:1.05rem; font-weight:600; }
 .sc-rd { color:#b9a8d6; font-size:.9rem; line-height:1.5; margin-top:2px; }
-.sc-steps { background: rgba(18,20,29,.55); border:1px solid rgba(255,255,255,.08); border-radius:16px;
+.sc-steps { background: var(--card); border:1px solid var(--border); border-radius:16px;
   padding:16px 20px; margin:10px 0; backdrop-filter: blur(16px); }
-.sc-st { font-weight:700; font-size:1.05rem; margin-bottom:6px; color:#fff; }
-.sc-steps ol { margin:0; padding-left:20px; color:#d1d5db; line-height:1.7; font-size:.92rem; }
-</style>
+.sc-st { font-weight:700; font-size:1.05rem; margin-bottom:6px; color: var(--text); }
+.sc-steps ol { margin:0; padding-left:20px; color: var(--text); line-height:1.7; font-size:.92rem; }
 """
-st.markdown(CSS, unsafe_allow_html=True)
+
+# Extra rules that only apply in LIGHT mode (they turn the dark-themed Streamlit widgets light)
+LIGHT_FIX = """
+/* ---- text colours ---- */
+h1, h2, h3, h4, [data-testid="stHeading"] * { color: var(--text) !important; }
+[data-testid="stMarkdownContainer"] p, [data-testid="stMarkdownContainer"] li,
+[data-testid="stMarkdownContainer"] strong, [data-testid="stMarkdownContainer"] em,
+[data-testid="stMarkdownContainer"] del, [data-testid="stWidgetLabel"] p,
+[data-testid="stMetricLabel"] *, [data-testid="stMetricValue"] *,
+[data-testid="stExpander"] summary * { color: var(--text) !important; }
+[data-testid="stCaptionContainer"] * { color: var(--muted) !important; }
+button[data-baseweb="tab"][aria-selected="false"] p { color: var(--muted) !important; }
+.stButton > button[kind="primary"] p, button[data-testid="stBaseButton-primary"] p { color:#fff !important; }
+
+/* ---- text boxes, number boxes, text areas: white with a thin border ---- */
+[data-testid="stTextInputRootElement"], [data-testid="stNumberInputContainer"],
+div[data-baseweb="input"], div[data-baseweb="base-input"], div[data-baseweb="textarea"],
+div[data-baseweb="select"] > div { background-color: var(--input) !important; }
+div[data-baseweb="input"], div[data-baseweb="textarea"], div[data-baseweb="select"] > div {
+  border: 1px solid var(--border) !important; }
+input, textarea { background-color: var(--input) !important; color: var(--text) !important;
+  -webkit-text-fill-color: var(--text) !important; caret-color: var(--text); }
+input::placeholder, textarea::placeholder { color: #9CA3AF !important; -webkit-text-fill-color: #9CA3AF !important; }
+
+/* ---- dropdown boxes (select, time) ---- */
+div[data-baseweb="select"] > div div { background-color: transparent !important; color: var(--text) !important; }
+div[data-baseweb="select"] svg { fill: var(--muted) !important; color: var(--muted) !important; }
+
+/* ---- the little + and - on number boxes ---- */
+[data-testid="stNumberInput"] button { background-color: rgba(17,24,39,.07) !important; color: var(--text) !important; }
+[data-testid="stNumberInput"] button svg { fill: var(--text) !important; }
+
+/* ---- expander header bar ---- */
+[data-testid="stExpander"], [data-testid="stExpander"] details { background-color: var(--card) !important; }
+[data-testid="stExpander"] summary { background-color: transparent !important; }
+[data-testid="stExpander"] summary:hover { background-color: rgba(17,24,39,.05) !important; }
+[data-testid="stExpander"] summary svg { fill: var(--text) !important; color: var(--text) !important; }
+
+/* ---- progress track and sliders ---- */
+div[role="progressbar"] { background-color: rgba(17,24,39,.12) !important; }
+[data-testid="stSliderTickBarMin"], [data-testid="stSliderTickBarMax"] { color: var(--muted) !important; }
+"""
+
+
+def is_dark():
+    return st.session_state.get("dark_mode", True)
+
+
+def build_css(dark):
+    v = DARK_VARS if dark else LIGHT_VARS
+    root = ":root{" + ";".join(f"--{k}:{val}" for k, val in v.items()) + ";color-scheme:" + ("dark" if dark else "light") + "}"
+    return "<style>" + root + BASE_CSS + ("" if dark else LIGHT_FIX) + "</style>"
 
 
 def header():
@@ -148,43 +207,194 @@ def header():
     )
 
 
+# ---- charts that look right in both modes ----
+def style_chart(chart):
+    fg = "#E5E7EB" if is_dark() else "#374151"
+    grid = "rgba(255,255,255,.10)" if is_dark() else "rgba(17,24,39,.12)"
+    return (chart.properties(height=260)
+            .configure(background="transparent")
+            .configure_axis(labelColor=fg, titleColor=fg, gridColor=grid, domainColor=grid, tickColor=grid)
+            .configure_legend(labelColor=fg, titleColor=fg)
+            .configure_view(strokeWidth=0))
+
+
+def show_chart(chart):
+    st.altair_chart(style_chart(chart), theme=None)
+
+
+def bar_chart(series, ymax=None):
+    if alt is None:
+        st.bar_chart(series)
+        return
+    d = series.reset_index()
+    d.columns = ["label", "value"]
+    y = alt.Y("value:Q", title=None, scale=alt.Scale(domain=[0, ymax]) if ymax else alt.Undefined)
+    show_chart(alt.Chart(d).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color="#8B5CF6").encode(
+        x=alt.X("label:N", sort=None, title=None, axis=alt.Axis(labelAngle=-30)), y=y,
+        tooltip=["label", "value"]))
+
+
+def line_chart(df):
+    """df needs columns: day, subject, pct"""
+    if alt is None:
+        line_chart(df)
+        return
+    d = df.groupby(["day", "subject"], as_index=False)["pct"].mean()
+    show_chart(alt.Chart(d).mark_line(point=True, strokeWidth=3).encode(
+        x=alt.X("day:O", title=None, axis=alt.Axis(labelAngle=-30)),
+        y=alt.Y("pct:Q", title=None, scale=alt.Scale(domain=[0, 100])),
+        color=alt.Color("subject:N", scale=alt.Scale(range=PALETTE)),
+        tooltip=["day", "subject", "pct"]))
+
+
 # ----------------------------------------------------------------------------
 # 1. Reminders
 # ----------------------------------------------------------------------------
+def tm_of(r):
+    return r["due_time"] if isinstance(r["due_time"], str) else ""
+
+
+def when_text(due_str, time_str):
+    txt = date.fromisoformat(due_str).strftime("%a, %d %b")
+    return txt + (f", {fmt_time(time_str)}" if time_str else "")
+
+
+def on_time(r):
+    """True/False if we know when the task was finished, otherwise None."""
+    d = r["done_at"]
+    if not isinstance(d, str) or not d:
+        return None
+    return datetime.fromisoformat(d) <= due_dt(r["due"], tm_of(r))
+
+
 def reminders_tab():
     st.subheader("📝 Smart Reminders")
-    st.caption("Type what the teacher said, in plain words. Campus Mate finds the type and the date.")
-    text = st.text_input("What did the teacher say?", placeholder="e.g. Bring chemistry record on Friday")
-    if st.button("Add reminder", type="primary") and text.strip():
-        task, kind, due, found, used_ai = smart_parse(text.strip())
-        run("INSERT INTO reminders(task,kind,due) VALUES(?,?,?)", (task, kind, due.isoformat()))
-        how = "🤖 AI" if used_ai else "📏 smart rules"
-        if found:
-            st.success(f"{how}: saved as **{kind}**, due **{due.strftime('%a, %d %b')}**")
-        else:
-            st.warning(f"No date found, so I set it for tomorrow ({due.strftime('%a, %d %b')}). Try adding 'on Friday' or '25/10'.")
+    st.caption("Type what the teacher said. Campus Mate finds the type, date and time. You can also pick them yourself.")
 
-    df = table("SELECT * FROM reminders WHERE done=0 ORDER BY due")
-    if df.empty:
+    msg = st.session_state.pop("rem_msg", None)
+    if msg:
+        (st.success if msg[0] == "ok" else st.warning)(msg[1])
+    if st.session_state.pop("reset_rem", False):  # clear the box after saving
+        st.session_state.pop("rem_text", None)
+
+    text = st.text_input("What did the teacher say?", placeholder="e.g. Bring chemistry record on Friday at 9 am",
+                         key="rem_text")
+    how = st.radio("Due date and time", ["Auto-detect from my sentence", "Pick manually"],
+                   horizontal=True, key="rem_how")
+    pick_date, pick_time, use_time = date.today() + timedelta(days=1), dtime(9, 0), False
+    if how == "Pick manually":
+        c1, c2 = st.columns(2)
+        pick_date = c1.date_input("Due date", value=date.today() + timedelta(days=1),
+                                  min_value=date.today(), key="rem_date")
+        use_time = c2.checkbox("Set a time", key="rem_use_time")
+        if use_time:
+            pick_time = c2.time_input("Due time", value=dtime(9, 0), key="rem_time")
+
+    if st.button("Add reminder", type="primary") and text.strip():
+        task, kind, due, found, used_ai, tm = smart_parse(text.strip())
+        if how == "Pick manually":
+            due, found, tm = pick_date, True, (pick_time.strftime("%H:%M") if use_time else "")
+        run("INSERT INTO reminders(task,kind,due,due_time) VALUES(?,?,?,?)", (task, kind, due.isoformat(), tm))
+        src = "🤖 AI" if used_ai else "📏 smart rules"
+        if found:
+            st.session_state["rem_msg"] = ("ok", f"{src}: saved as **{kind}**, due **{when_text(due.isoformat(), tm)}**")
+        else:
+            st.session_state["rem_msg"] = ("warn", f"No date found, so I set it for tomorrow ({when_text(due.isoformat(), tm)}). "
+                                                    "Try adding 'on Friday' or '25/10', or use Pick manually.")
+        st.session_state["reset_rem"] = True
+        st.rerun()
+
+    pend = table("SELECT * FROM reminders WHERE done=0 ORDER BY due, COALESCE(NULLIF(due_time,''),'23:59')")
+    done = table("SELECT * FROM reminders WHERE done=1 ORDER BY COALESCE(done_at,'') DESC")
+
+    # ---- completed-task tracking ----
+    total = len(pend) + len(done)
+    if total:
+        known = [k for k in (on_time(r) for _, r in done.iterrows()) if k is not None]
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Pending", len(pend))
+        m2.metric("Completed", len(done))
+        m3.metric("Done on time", f"{sum(known) / len(known) * 100:.0f}%" if known else "-")
+        st.progress(len(done) / total, text=f"{len(done)} of {total} tasks completed")
+
+    urgent = [d for d in pend["due"] if (date.fromisoformat(d) - date.today()).days <= 1]
+    if urgent:
+        st.error(f"⏰ {len(urgent)} thing(s) due today, tomorrow or overdue. Pack your bag tonight!")
+
+    # ---- edit a reminder (change its date / time) ----
+    eid = st.session_state.get("edit_rem")
+    if eid is not None:
+        row = pend[pend["id"] == eid]
+        if row.empty:
+            st.session_state.pop("edit_rem", None)
+        else:
+            r = row.iloc[0]
+            with st.container(border=True):
+                st.markdown("**✏️ Edit reminder**")
+                new_task = st.text_input("Task", value=r["task"], key=f"rt{eid}")
+                c1, c2 = st.columns(2)
+                new_date = c1.date_input("Due date", value=date.fromisoformat(r["due"]), key=f"rd{eid}")
+                has_t = c2.checkbox("Set a time", value=bool(tm_of(r)), key=f"rc{eid}")
+                new_time = ""
+                if has_t:
+                    old = tm_of(r) or "09:00"
+                    t_val = c2.time_input("Due time", value=dtime(int(old[:2]), int(old[3:5])), key=f"rtm{eid}")
+                    new_time = t_val.strftime("%H:%M")
+                s1, s2 = st.columns(2)
+                if s1.button("💾 Save changes", type="primary", key="save_rem") and new_task.strip():
+                    run("UPDATE reminders SET task=?, due=?, due_time=? WHERE id=?",
+                        (new_task.strip(), new_date.isoformat(), new_time, int(eid)))
+                    st.session_state.pop("edit_rem", None)
+                    st.toast("Reminder updated ✅")
+                    st.rerun()
+                if s2.button("Cancel", key="cancel_rem"):
+                    st.session_state.pop("edit_rem", None)
+                    st.rerun()
+
+    # ---- pending list ----
+    if pend.empty:
         st.info("No pending reminders. You're all caught up! 🎉")
-    else:
-        urgent = [d for d in df["due"] if (date.fromisoformat(d) - date.today()).days <= 1]
-        if urgent:
-            st.error(f"⏰ {len(urgent)} thing(s) due today, tomorrow or overdue. Pack your bag tonight!")
-    for _, r in df.iterrows():
-        c1, c2, c3 = st.columns([5, 1.4, 1])
-        c1.markdown(f"**{r['task']}**  \n{r['kind']} · {days_label(r['due'])} ({r['due']})")
-        if c2.button("✅ Done", key=f"done{r['id']}"):
-            run("UPDATE reminders SET done=1 WHERE id=?", (int(r["id"]),))
+    for _, r in pend.iterrows():
+        rid, tm = int(r["id"]), tm_of(r)
+        c1, c2, c3, c4 = st.columns([5, 1.7, 1, 1])
+        c1.markdown(f"**{r['task']}**  \n{r['kind']} · {due_label(r['due'], tm)}  \n📅 {when_text(r['due'], tm)}")
+        if c2.button("✅ Done", key=f"done{rid}"):
+            run("UPDATE reminders SET done=1, done_at=? WHERE id=?", (datetime.now().strftime("%Y-%m-%d %H:%M"), rid))
+            st.toast("Nice work! Task completed 🎉")
             st.rerun()
-        if c3.button("🗑️", key=f"del{r['id']}"):
-            run("DELETE FROM reminders WHERE id=?", (int(r["id"]),))
+        if c3.button("✏️", key=f"editr{rid}"):
+            st.session_state["edit_rem"] = rid
             st.rerun()
+        if c4.button("🗑️", key=f"delr{rid}"):
+            run("DELETE FROM reminders WHERE id=?", (rid,))
+            st.rerun()
+
+    # ---- completed list ----
+    if not done.empty:
+        with st.expander(f"✅ Completed tasks ({len(done)})"):
+            for _, r in done.iterrows():
+                rid, tm = int(r["id"]), tm_of(r)
+                ot = on_time(r)
+                badge = "" if ot is None else (" · ✅ On time" if ot else " · ⏰ Finished late")
+                fin = ""
+                if isinstance(r["done_at"], str) and r["done_at"]:
+                    fin = " · finished " + datetime.fromisoformat(r["done_at"]).strftime("%d %b, %I:%M %p")
+                c1, c2, c3 = st.columns([5, 1.7, 1])
+                c1.markdown(f"~~{r['task']}~~  \n{r['kind']} · due {when_text(r['due'], tm)}{fin}{badge}")
+                if c2.button("↩️ Undo", key=f"undo{rid}"):
+                    run("UPDATE reminders SET done=0, done_at=NULL WHERE id=?", (rid,))
+                    st.rerun()
+                if c3.button("🗑️", key=f"deld{rid}"):
+                    run("DELETE FROM reminders WHERE id=?", (rid,))
+                    st.rerun()
 
     st.divider()
     if st.button("📲 Send me tonight's reminder on Telegram now"):
         ok, info = send_digest()
-        (st.success if ok else st.error)(info)
+        if ok:
+            st.success(info)
+        else:
+            st.error(info)
 
 
 # ----------------------------------------------------------------------------
@@ -259,22 +469,21 @@ def expenses_tab():
         by_cat = this.groupby("category")["amount"].sum().sort_values(ascending=False)
         t1, t2, t3 = st.tabs(["📊 By category", "🍩 Share", "📅 Daily"])
         with t1:
-            st.bar_chart(by_cat)
+            bar_chart(by_cat)
         with t2:
             try:
                 import altair as alt
                 d = by_cat.reset_index()
                 d.columns = ["category", "amount"]
-                st.altair_chart(
-                    alt.Chart(d).mark_arc(innerRadius=55).encode(
-                        theta="amount:Q", color=alt.Color("category:N"), tooltip=["category", "amount"]),
-                    use_container_width=True)
+                show_chart(alt.Chart(d).mark_arc(innerRadius=55).encode(
+                    theta="amount:Q", color=alt.Color("category:N", scale=alt.Scale(range=PALETTE)),
+                    tooltip=["category", "amount"]))
             except Exception:
-                st.bar_chart(by_cat)
+                bar_chart(by_cat)
             for cat, amt in by_cat.items():
                 st.write(f"**{cat}**: ₹{amt:,.0f} ({amt / spent * 100:.0f}%)")
         with t3:
-            st.bar_chart(this.groupby("day")["amount"].sum())
+            bar_chart(this.groupby("day")["amount"].sum())
         st.info(f"💡 Your biggest spending area this month is **{by_cat.index[0]}** (₹{by_cat.iloc[0]:,.0f}).")
 
     # --- history with edit and delete ---
@@ -376,7 +585,7 @@ def sos_tab():
            f"Location: {where}. Please call me immediately.")
 
     st.markdown("&nbsp;")
-    if st.button("🚨 I FEEL UNSAFE", type="primary", use_container_width=True):
+    if st.button("🚨 I FEEL UNSAFE", type="primary", key="sos_btn"):
         if tg_ready:
             gid = get_setting("guardian_chat_id")
             ok, info = tg_send(gid, msg)
@@ -616,10 +825,10 @@ def progress_tab():
     avg = df.groupby("subject")["pct"].mean().round(1).sort_values()
     st.metric("Overall average", f"{df['pct'].mean():.1f}%")
     st.markdown("**Average by subject**")
-    st.bar_chart(avg)
+    bar_chart(avg, ymax=100)
     if df["exam"].nunique() > 1:
         st.markdown("**Trend over time**")
-        st.line_chart(df.pivot_table(index="day", columns="subject", values="pct", aggfunc="mean"))
+        line_chart(df)
 
     st.markdown("### 🎯 Your improvement plan")
     weak = []
@@ -713,9 +922,16 @@ def setup_tab():
     if c1.button("Load demo data"):
         today = date.today()
         run("DELETE FROM reminders"); run("DELETE FROM expenses"); run("DELETE FROM marks")
-        for task, kind, d in [("Bring chemistry record", "Bring item", 1), ("Maths unit test", "Test / Exam", 3),
-                              ("Physics assignment submission", "Assignment", 2), ("Science project model", "Project", 6)]:
-            run("INSERT INTO reminders(task,kind,due) VALUES(?,?,?)", (task, kind, (today + timedelta(days=d)).isoformat()))
+        for task, kind, d, tm in [("Bring chemistry record", "Bring item", 1, "08:30"), ("Maths unit test", "Test / Exam", 3, "10:00"),
+                                  ("Physics assignment submission", "Assignment", 2, "17:00"), ("Science project model", "Project", 6, "")]:
+            run("INSERT INTO reminders(task,kind,due,due_time) VALUES(?,?,?,?)", (task, kind, (today + timedelta(days=d)).isoformat(), tm))
+        yday, two = (today - timedelta(days=1)).isoformat(), (today - timedelta(days=2)).isoformat()
+        run("INSERT INTO reminders(task,kind,due,due_time,done,done_at) VALUES(?,?,?,?,1,?)",
+            ("English homework", "Homework", yday, "18:00", f"{yday} 16:30"))
+        run("INSERT INTO reminders(task,kind,due,due_time,done,done_at) VALUES(?,?,?,?,1,?)",
+            ("Bring geometry box", "Bring item", two, "08:00", f"{yday} 09:15"))
+        run("INSERT INTO reminders(task,kind,due,due_time,done,done_at) VALUES(?,?,?,?,1,?)",
+            ("Chemistry worksheet", "Homework", two, "", f"{two} 20:10"))
         for i, (amt, mode, cat, note) in enumerate([(120, "UPI", "Food", "Canteen"), (60, "Cash", "Travel", "Bus"),
                                                     (250, "UPI", "Stationery", "Notebooks"), (180, "UPI", "Entertainment", "Movie"),
                                                     (90, "Cash", "Food", "Snacks"), (400, "UPI", "Shopping", "Headphones")]):
@@ -735,7 +951,13 @@ def setup_tab():
 
 # ----------------------------------------------------------------------------
 init_db()
+if "dark_mode" not in st.session_state:  # remembered in the link, so a refresh keeps your choice
+    st.session_state["dark_mode"] = st.query_params.get("mode", "dark") != "light"
+st.markdown(build_css(is_dark()), unsafe_allow_html=True)
 header()
+_space, _switch = st.columns([2, 1])
+_switch.toggle("🌙 Dark mode", key="dark_mode")
+st.query_params["mode"] = "dark" if st.session_state["dark_mode"] else "light"
 tabs = st.tabs(["📝 Reminders", "💸 Expenses", "🆘 SOS", "🛡️ Scam Shield", "📈 Progress", "⚙️ Setup"])
 for tab, fn in zip(tabs, [reminders_tab, expenses_tab, sos_tab, scam_tab, progress_tab, setup_tab]):
     with tab:

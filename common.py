@@ -8,7 +8,7 @@ import re
 import sqlite3
 import urllib.error
 import urllib.request
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 
@@ -39,7 +39,8 @@ def init_db():
             """
             CREATE TABLE IF NOT EXISTS reminders(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task TEXT, kind TEXT, due TEXT, done INTEGER DEFAULT 0);
+                task TEXT, kind TEXT, due TEXT, done INTEGER DEFAULT 0,
+                due_time TEXT DEFAULT '', done_at TEXT);
             CREATE TABLE IF NOT EXISTS expenses(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 day TEXT, amount REAL, mode TEXT, category TEXT, note TEXT);
@@ -50,6 +51,12 @@ def init_db():
                 key TEXT PRIMARY KEY, value TEXT);
             """
         )
+        cols = [r[1] for r in c.execute("PRAGMA table_info(reminders)")]
+        if "due_time" not in cols:
+            c.execute("ALTER TABLE reminders ADD COLUMN due_time TEXT DEFAULT ''")
+        if "done_at" not in cols:
+            c.execute("ALTER TABLE reminders ADD COLUMN done_at TEXT")
+        c.commit()
 
 
 def get_setting(key, default=""):
@@ -221,47 +228,94 @@ def parse_due(text):
     return today + timedelta(days=1), False
 
 
+def parse_time(text):
+    """Find a time like '9 am', '4:30 pm' or 'at 16:30'. Returns 'HH:MM' or ''."""
+    t = text.lower()
+    m = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)", t)
+    if m:
+        h, mi, ap = int(m.group(1)), int(m.group(2) or 0), m.group(3)[0]
+        if 1 <= h <= 12 and mi < 60:
+            if ap == "p" and h != 12:
+                h += 12
+            if ap == "a" and h == 12:
+                h = 0
+            return f"{h:02d}:{mi:02d}"
+    m = re.search(r"\b(?:at|by)\s*([01]?\d|2[0-3]):([0-5]\d)\b", t)
+    if m:
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
+    if re.search(r"\bnoon\b", t):
+        return "12:00"
+    return ""
+
+
+def fmt_time(hhmm):
+    """'16:30' -> '4:30 PM'"""
+    try:
+        return datetime.strptime(hhmm, "%H:%M").strftime("%I:%M %p").lstrip("0")
+    except Exception:
+        return ""
+
+
 def smart_parse(text):
-    """Returns (task, kind, due_date, date_found, used_ai). AI first, simple rules as backup."""
+    """Returns (task, kind, due_date, date_found, used_ai, due_time 'HH:MM' or '')."""
     if ai_available():
         today = date.today()
         out = ask_ai(
             f"Today is {today.strftime('%A, %Y-%m-%d')}. A student noted something a teacher said: \"{text}\"\n"
             f"Reply with ONLY JSON like {{\"task\": \"short clear task\", \"kind\": one of {KIND_NAMES}, "
-            f"\"due\": \"YYYY-MM-DD\"}}. If no date is mentioned, use tomorrow."
+            f"\"due\": \"YYYY-MM-DD\", \"time\": \"HH:MM in 24h, or empty string if no time is mentioned\"}}. "
+            f"If no date is mentioned, use tomorrow."
         )
         if out:
             try:
                 d = json.loads(re.search(r"\{.*\}", out, re.S).group(0))
                 kind = d.get("kind") if d.get("kind") in KIND_NAMES else detect_kind(text)
-                return d.get("task") or text, kind, date.fromisoformat(d["due"]), True, True
+                tm = d.get("time") or ""
+                if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", tm):
+                    tm = parse_time(text)
+                return d.get("task") or text, kind, date.fromisoformat(d["due"]), True, True, tm
             except Exception:
                 pass
     due, found = parse_due(text)
-    return text, detect_kind(text), due, found, False
+    return text, detect_kind(text), due, found, False, parse_time(text)
+
+
+def due_dt(due_str, time_str=""):
+    """The exact moment a task is due (end of day if no time was set)."""
+    return datetime.fromisoformat(f"{due_str} {time_str or '23:59'}")
+
+
+def due_label(due_str, time_str=""):
+    now = datetime.now()
+    d = due_dt(due_str, time_str)
+    when = f" at {fmt_time(time_str)}" if time_str else ""
+    if now > d:
+        if d.date() == now.date():
+            return f"🔴 Time passed{when}"
+        return f"🔴 Overdue by {(now.date() - d.date()).days} day(s)"
+    left = (d.date() - now.date()).days
+    if left == 0:
+        return f"🟠 Due TODAY{when}"
+    if left == 1:
+        return f"🟡 Due tomorrow{when}"
+    return f"🟢 {left} days left{when}"
 
 
 def days_label(due_str):
-    left = (date.fromisoformat(due_str) - date.today()).days
-    if left < 0:
-        return f"🔴 Overdue by {-left} day(s)"
-    if left == 0:
-        return "🟠 Due TODAY"
-    if left == 1:
-        return "🟡 Due tomorrow"
-    return f"🟢 {left} days left"
+    return due_label(due_str, "")
 
 
 def tonight_digest():
     """Text listing everything due tomorrow / today / overdue, or None if nothing."""
     today, tomorrow = date.today().isoformat(), (date.today() + timedelta(days=1)).isoformat()
-    df = table("SELECT * FROM reminders WHERE done=0 AND due<=? ORDER BY due", (tomorrow,))
+    df = table("SELECT * FROM reminders WHERE done=0 AND due<=? ORDER BY due, COALESCE(NULLIF(due_time,''),'23:59')", (tomorrow,))
     if df.empty:
         return None
     lines = ["🎒 Campus Mate - pack your bag check!"]
     for _, r in df.iterrows():
         tag = "OVERDUE" if r["due"] < today else ("TODAY" if r["due"] == today else "TOMORROW")
-        lines.append(f"• [{tag}] {r['task']} ({r['kind']})")
+        when = f" at {fmt_time(r['due_time'])}" if isinstance(r["due_time"], str) and r["due_time"] else ""
+        lines.append(f"• [{tag}] {r['task']} ({r['kind']}){when}")
     return "\n".join(lines)
 
 
